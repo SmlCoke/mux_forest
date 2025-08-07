@@ -126,9 +126,16 @@ class BinaryDecisionTree:
             # Right=-1, return left  
             if right_val == -1:
                 return left
-            
-            # Left=1, Right=0 → ~sel[i] (encoded as special value)
-            # For now, keep the mux structure
+        
+        # Check if one child is don't care
+        elif left.is_terminal() and left.value == -1:
+            return right
+        elif right.is_terminal() and right.value == -1:
+            return left
+        
+        # Check if both subtrees are identical
+        elif left == right:
+            return left
         
         # Update the node with simplified children
         node.left = left
@@ -237,10 +244,17 @@ class BinaryDecisionForest:
         """
         min_nodes = float('inf')
         best_order = self.sel_vars.copy()
+        current_nodes = self.count_total_nodes()
+        min_nodes = current_nodes
+        
+        print(f"Initial order {self.sel_vars}: {current_nodes} nodes")
         
         # Try all permutations of sel_vars
         for perm in itertools.permutations(self.sel_vars):
             perm_list = list(perm)
+            
+            if perm_list == self.sel_vars:
+                continue  # Skip the original order
             
             # Create forest with this ordering
             try:
@@ -249,11 +263,15 @@ class BinaryDecisionForest:
                 temp_forest = BinaryDecisionForest(perm_list, reordered_dout_lists)
                 node_count = temp_forest.count_total_nodes()
                 
+                print(f"Testing order {perm_list}: {node_count} nodes")
+                
                 if node_count < min_nodes:
                     min_nodes = node_count
                     best_order = perm_list
-            except Exception:
+                    print(f"  New best: {min_nodes} nodes")
+            except Exception as e:
                 # Skip invalid permutations
+                print(f"  Error with {perm_list}: {e}")
                 continue
         
         return best_order, min_nodes
@@ -262,40 +280,43 @@ class BinaryDecisionForest:
         """
         Reorder dout_lists according to new sel variable ordering.
         
-        This is complex because changing sel variable order changes how the 
-        truth table indices map to the binary combinations.
+        The key insight is that we need to map each truth table row (combination)
+        from the old variable order to the new variable order.
         """
-        # Create mapping from old to new bit positions
-        old_to_new = {}
-        for i, var in enumerate(self.sel_vars):
+        num_vars = len(self.sel_vars)
+        num_combinations = 2 ** num_vars
+        
+        # Create mapping from old variable positions to new positions
+        var_mapping = {}
+        for old_pos, var in enumerate(self.sel_vars):
             new_pos = new_sel_order.index(var)
-            old_to_new[i] = new_pos
+            var_mapping[old_pos] = new_pos
         
         reordered_lists = []
         for dout_values in self.dout_lists:
-            reordered_values = [0] * len(dout_values)
+            reordered_values = [0] * num_combinations
             
-            for old_idx, value in enumerate(dout_values):
-                # Convert old index to binary representation
+            for old_idx in range(num_combinations):
+                # Extract bit values for old index
                 old_bits = []
                 temp = old_idx
-                for _ in range(len(self.sel_vars)):
-                    old_bits.append(temp % 2)
-                    temp //= 2
-                old_bits.reverse()
+                for _ in range(num_vars):
+                    old_bits.append(temp & 1)
+                    temp >>= 1
+                old_bits.reverse()  # MSB first
                 
-                # Reorder bits according to new variable order
-                new_bits = [0] * len(old_bits)
-                for old_pos, bit in enumerate(old_bits):
-                    new_pos = old_to_new[old_pos]
-                    new_bits[new_pos] = bit
+                # Remap bits according to new variable order
+                new_bits = [0] * num_vars
+                for old_pos, bit_val in enumerate(old_bits):
+                    new_pos = var_mapping[old_pos]
+                    new_bits[new_pos] = bit_val
                 
-                # Convert new bits back to index
+                # Calculate new index from remapped bits
                 new_idx = 0
                 for bit in new_bits:
-                    new_idx = new_idx * 2 + bit
+                    new_idx = (new_idx << 1) | bit
                 
-                reordered_values[new_idx] = value
+                reordered_values[new_idx] = dout_values[old_idx]
             
             reordered_lists.append(reordered_values)
         
