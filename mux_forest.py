@@ -8,6 +8,7 @@ mux_tree (nested ternary operators) with optimized AIG node count.
 from typing import List, Dict, Set, Tuple, Optional, Union
 from dataclasses import dataclass
 import itertools
+import random
 
 
 @dataclass
@@ -235,46 +236,328 @@ class BinaryDecisionForest:
             total += tree.count_nodes(visited)
         return total
     
-    def optimize_sel_order(self) -> Tuple[List[str], int]:
+    def optimize_sel_order(self, max_iterations: int = 1000, use_heuristics: bool = True) -> Tuple[List[str], int]:
         """
         Find the optimal sel variable ordering that minimizes total AIG nodes.
+        Uses efficient heuristic algorithms for large-scale optimization.
+        
+        Args:
+            max_iterations: Maximum number of permutations to test (default: 1000)
+            use_heuristics: Whether to use heuristic optimization for large problems (default: True)
         
         Returns:
             Tuple of (optimal_sel_vars, minimum_node_count)
         """
-        min_nodes = float('inf')
-        best_order = self.sel_vars.copy()
+        num_vars = len(self.sel_vars)
         current_nodes = self.count_total_nodes()
         min_nodes = current_nodes
+        best_order = self.sel_vars.copy()
         
         print(f"Initial order {self.sel_vars}: {current_nodes} nodes")
+        print(f"Optimizing {num_vars} variables...")
         
-        # Try all permutations of sel_vars
+        # For small problems (≤6 variables), use exhaustive search
+        if num_vars <= 6:
+            return self._exhaustive_search()
+        
+        # For large problems, use heuristic approaches
+        if use_heuristics:
+            return self._heuristic_optimization(max_iterations)
+        else:
+            # Limited random sampling
+            return self._limited_random_search(max_iterations)
+    
+    def _exhaustive_search(self) -> Tuple[List[str], int]:
+        """Exhaustive search for small problems (≤6 variables)."""
+        min_nodes = self.count_total_nodes()
+        best_order = self.sel_vars.copy()
+        
+        print("Using exhaustive search for small problem...")
+        
+        tested = 0
         for perm in itertools.permutations(self.sel_vars):
             perm_list = list(perm)
+            tested += 1
             
             if perm_list == self.sel_vars:
                 continue  # Skip the original order
             
-            # Create forest with this ordering
             try:
-                # Need to reorder dout_lists according to new sel variable order
                 reordered_dout_lists = self._reorder_dout_lists(perm_list)
                 temp_forest = BinaryDecisionForest(perm_list, reordered_dout_lists)
                 node_count = temp_forest.count_total_nodes()
                 
-                print(f"Testing order {perm_list}: {node_count} nodes")
+                if tested % 10 == 0:
+                    print(f"  Tested {tested} permutations, current best: {min_nodes}")
                 
                 if node_count < min_nodes:
                     min_nodes = node_count
                     best_order = perm_list
-                    print(f"  New best: {min_nodes} nodes")
+                    print(f"  New best: {min_nodes} nodes with order {best_order}")
             except Exception as e:
-                # Skip invalid permutations
-                print(f"  Error with {perm_list}: {e}")
+                continue
+        
+        print(f"Exhaustive search completed. Tested {tested} permutations.")
+        return best_order, min_nodes
+    
+    def _heuristic_optimization(self, max_iterations: int) -> Tuple[List[str], int]:
+        """
+        Heuristic optimization using greedy local search and variable importance analysis.
+        """
+        min_nodes = self.count_total_nodes()
+        best_order = self.sel_vars.copy()
+        
+        print("Using heuristic optimization for large problem...")
+        
+        # Step 1: Variable importance analysis
+        var_importance = self._calculate_variable_importance()
+        print(f"Variable importance scores: {var_importance}")
+        
+        # Step 2: Greedy construction based on importance
+        greedy_order, greedy_nodes = self._greedy_construction(var_importance)
+        if greedy_nodes < min_nodes:
+            min_nodes = greedy_nodes
+            best_order = greedy_order
+            print(f"Greedy construction improved to {min_nodes} nodes")
+        
+        # Step 3: Local search optimization
+        local_order, local_nodes = self._local_search_optimization(best_order, max_iterations // 2)
+        if local_nodes < min_nodes:
+            min_nodes = local_nodes
+            best_order = local_order
+            print(f"Local search improved to {min_nodes} nodes")
+        
+        # Step 4: Random restart with best positions
+        restart_order, restart_nodes = self._random_restart_search(best_order, var_importance, max_iterations // 2)
+        if restart_nodes < min_nodes:
+            min_nodes = restart_nodes
+            best_order = restart_order
+            print(f"Random restart improved to {min_nodes} nodes")
+        
+        return best_order, min_nodes
+    
+    def _calculate_variable_importance(self) -> Dict[str, float]:
+        """
+        Calculate importance score for each variable based on how much it affects tree structure.
+        Higher scores indicate variables that should be placed higher in the tree.
+        """
+        importance = {}
+        
+        for var in self.sel_vars:
+            # Try placing this variable at different positions and measure impact
+            score = 0.0
+            test_positions = min(3, len(self.sel_vars))  # Test top 3 positions
+            
+            for pos in range(test_positions):
+                test_order = self.sel_vars.copy()
+                test_order.remove(var)
+                test_order.insert(pos, var)
+                
+                try:
+                    reordered_dout_lists = self._reorder_dout_lists(test_order)
+                    temp_forest = BinaryDecisionForest(test_order, reordered_dout_lists)
+                    nodes = temp_forest.count_total_nodes()
+                    
+                    # Weight higher positions more (position 0 has highest weight)
+                    weight = 1.0 / (pos + 1)
+                    score += weight / nodes if nodes > 0 else weight
+                except:
+                    continue
+            
+            importance[var] = score
+        
+        return importance
+    
+    def _greedy_construction(self, var_importance: Dict[str, float]) -> Tuple[List[str], int]:
+        """
+        Construct variable order greedily based on importance scores.
+        """
+        # Sort variables by importance (highest first)
+        sorted_vars = sorted(self.sel_vars, key=lambda v: var_importance.get(v, 0), reverse=True)
+        
+        try:
+            reordered_dout_lists = self._reorder_dout_lists(sorted_vars)
+            temp_forest = BinaryDecisionForest(sorted_vars, reordered_dout_lists)
+            nodes = temp_forest.count_total_nodes()
+            print(f"Greedy construction order {sorted_vars}: {nodes} nodes")
+            return sorted_vars, nodes
+        except:
+            return self.sel_vars.copy(), self.count_total_nodes()
+    
+    def _local_search_optimization(self, initial_order: List[str], max_iterations: int) -> Tuple[List[str], int]:
+        """
+        Local search optimization using adjacent swaps and small moves.
+        """
+        current_order = initial_order.copy()
+        current_nodes = self._evaluate_order(current_order)
+        best_order = current_order.copy()
+        best_nodes = current_nodes
+        
+        print(f"Starting local search from {current_nodes} nodes...")
+        
+        iterations = 0
+        improvements = 0
+        
+        while iterations < max_iterations:
+            iterations += 1
+            improved = False
+            
+            # Try adjacent swaps
+            for i in range(len(current_order) - 1):
+                test_order = current_order.copy()
+                test_order[i], test_order[i + 1] = test_order[i + 1], test_order[i]
+                
+                test_nodes = self._evaluate_order(test_order)
+                
+                if test_nodes < current_nodes:
+                    current_order = test_order
+                    current_nodes = test_nodes
+                    improved = True
+                    improvements += 1
+                    
+                    if test_nodes < best_nodes:
+                        best_order = test_order.copy()
+                        best_nodes = test_nodes
+                        print(f"  Local search improvement: {best_nodes} nodes")
+                    break
+            
+            # Try moving variables to different positions
+            if not improved and iterations % 10 == 0:
+                for i in range(len(current_order)):
+                    for j in range(len(current_order)):
+                        if i == j:
+                            continue
+                        
+                        test_order = current_order.copy()
+                        var = test_order.pop(i)
+                        test_order.insert(j, var)
+                        
+                        test_nodes = self._evaluate_order(test_order)
+                        
+                        if test_nodes < current_nodes:
+                            current_order = test_order
+                            current_nodes = test_nodes
+                            improved = True
+                            improvements += 1
+                            
+                            if test_nodes < best_nodes:
+                                best_order = test_order.copy()
+                                best_nodes = test_nodes
+                                print(f"  Local search improvement: {best_nodes} nodes")
+                            break
+                    if improved:
+                        break
+            
+            if not improved:
+                # No improvement found, stop early
+                break
+        
+        print(f"Local search completed: {iterations} iterations, {improvements} improvements")
+        return best_order, best_nodes
+    
+    def _random_restart_search(self, initial_order: List[str], var_importance: Dict[str, float], 
+                              max_iterations: int) -> Tuple[List[str], int]:
+        """
+        Random restart search with bias towards important variables.
+        """
+        best_order = initial_order.copy()
+        best_nodes = self._evaluate_order(best_order)
+        
+        print(f"Starting random restart search...")
+        
+        restart_attempts = min(max_iterations // 20, 50)  # At most 50 restarts
+        
+        for restart in range(restart_attempts):
+            # Generate biased random order
+            random_order = self._generate_biased_random_order(var_importance)
+            
+            # Short local search from this starting point
+            local_order, local_nodes = self._local_search_optimization(random_order, 20)
+            
+            if local_nodes < best_nodes:
+                best_order = local_order
+                best_nodes = local_nodes
+                print(f"  Random restart improvement: {best_nodes} nodes")
+        
+        return best_order, best_nodes
+    
+    def _generate_biased_random_order(self, var_importance: Dict[str, float]) -> List[str]:
+        """
+        Generate random order biased towards important variables being early.
+        """
+        import random
+        
+        # Create weighted list favoring important variables
+        vars_with_weights = [(var, var_importance.get(var, 0.1)) for var in self.sel_vars]
+        
+        order = []
+        remaining_vars = vars_with_weights.copy()
+        
+        while remaining_vars:
+            # Select variable with probability proportional to importance
+            total_weight = sum(weight for _, weight in remaining_vars)
+            if total_weight <= 0:
+                # Fallback to uniform selection
+                selected_var, _ = random.choice(remaining_vars)
+            else:
+                r = random.random() * total_weight
+                cumulative = 0
+                selected_var = remaining_vars[0][0]
+                for var, weight in remaining_vars:
+                    cumulative += weight
+                    if r <= cumulative:
+                        selected_var = var
+                        break
+            
+            order.append(selected_var)
+            remaining_vars = [(v, w) for v, w in remaining_vars if v != selected_var]
+        
+        return order
+    
+    def _limited_random_search(self, max_iterations: int) -> Tuple[List[str], int]:
+        """
+        Limited random search for cases where heuristics are disabled.
+        """
+        import random
+        
+        min_nodes = self.count_total_nodes()
+        best_order = self.sel_vars.copy()
+        
+        print(f"Using limited random search with {max_iterations} iterations...")
+        
+        for i in range(max_iterations):
+            # Generate random permutation
+            test_order = self.sel_vars.copy()
+            random.shuffle(test_order)
+            
+            try:
+                reordered_dout_lists = self._reorder_dout_lists(test_order)
+                temp_forest = BinaryDecisionForest(test_order, reordered_dout_lists)
+                node_count = temp_forest.count_total_nodes()
+                
+                if i % 100 == 0:
+                    print(f"  Tested {i} random orders, current best: {min_nodes}")
+                
+                if node_count < min_nodes:
+                    min_nodes = node_count
+                    best_order = test_order
+                    print(f"  New best: {min_nodes} nodes")
+            except Exception:
                 continue
         
         return best_order, min_nodes
+    
+    def _evaluate_order(self, order: List[str]) -> int:
+        """
+        Evaluate the AIG node count for a given variable order.
+        Returns a large number if evaluation fails.
+        """
+        try:
+            reordered_dout_lists = self._reorder_dout_lists(order)
+            temp_forest = BinaryDecisionForest(order, reordered_dout_lists)
+            return temp_forest.count_total_nodes()
+        except Exception:
+            return float('inf')
     
     def _reorder_dout_lists(self, new_sel_order: List[str]) -> List[List[int]]:
         """
@@ -415,6 +698,15 @@ if __name__ == "__main__":
     
     # Try optimization
     print(f"\nOptimizing sel variable order...")
-    optimal_order, min_nodes = forest.optimize_sel_order()
+    optimal_order, min_nodes = forest.optimize_sel_order(max_iterations=1000)
     print(f"Optimal order: {optimal_order}")
     print(f"Minimum nodes: {min_nodes}")
+    
+    # Create optimized forest if order changed
+    if optimal_order != sel_vars:
+        print(f"\nOptimized forest with reordered variables:")
+        optimized_forest = BinaryDecisionForest(optimal_order, 
+            forest._reorder_dout_lists(optimal_order))
+        optimized_assigns = optimized_forest.generate_verilog_assigns()
+        for assign in optimized_assigns:
+            print(f"  {assign}")
