@@ -1,10 +1,18 @@
 # mux_forest
 
-Binary Decision Forest implementation for optimized Verilog pmux to mux_tree conversion with scalable optimization algorithms.
+Binary Decision Forest implementation for optimized Verilog pmux to mux_tree conversion with **independent per-tree optimization**.
 
 ## Overview
 
-This project implements a Binary Decision Forest system that converts Verilog pmux (casez statements) to optimized mux_tree (nested ternary operators) with minimal AIG node count. The system supports handling outputs with variables (like `din[i]`) and don't care values, and includes advanced optimization algorithms for large-scale problems.
+This project implements a Binary Decision Forest system that converts Verilog pmux (casez statements) to optimized mux_tree (nested ternary operators) with minimal AIG node count. The system supports handling outputs with variables (like `din[i]`) and don't care values, and includes advanced optimization algorithms that **optimize each tree independently** for maximum simplification.
+
+## Key Innovation: Independent Per-Tree Optimization
+
+Unlike traditional approaches that force all trees to use the same sel variable order, this implementation allows **each output bit to find its own optimal sel order**. This leads to:
+
+- **Better individual tree simplification** based on terminal node patterns
+- **Natural sharing** when trees happen to have similar optimal structures  
+- **Superior overall AIG node reduction** compared to forced common ordering
 
 ## Quick Start
 
@@ -16,7 +24,7 @@ sel_vars, dout_lists = parse_verilog_example()
 
 # Create and optimize forest
 forest = BinaryDecisionForest(sel_vars, dout_lists)
-optimal_order, min_nodes = forest.optimize_sel_order()
+optimal_orders, min_nodes = forest.optimize_sel_order()  # Returns orders per tree
 
 # Generate optimized Verilog
 assigns = forest.generate_verilog_assigns("dout")
@@ -30,24 +38,27 @@ for assign in assigns:
 - **Tree Simplification**: Automatic optimization using don't care propagation and subtree merging  
 - **AIG Node Counting**: Accurate node counting with reuse detection across multiple trees
 - **Expression Generation**: Generate clean mux_tree expressions in Verilog format
-- **Advanced Sel Variable Optimization**: Scalable algorithms for optimal sel signal ordering
+- **Independent Per-Tree Optimization**: Each tree finds its own optimal sel variable ordering
   - Exhaustive search for small problems (≤6 variables)
   - Heuristic optimization for large problems (>6 variables)
-  - Variable importance analysis and greedy construction
+  - Variable importance analysis per tree
   - Local search with adjacent swaps and position moves
   - Random restart search with importance-biased sampling
 
 ## Optimization Performance
 
-The optimization algorithms automatically adapt to problem size:
+The optimization algorithms automatically adapt to problem size and optimize each tree independently:
 
 | Problem Size | Method | Time | Quality |
 |-------------|--------|------|---------|
-| ≤6 variables | Exhaustive search | Seconds | Optimal |
-| 7-10 variables | Heuristic optimization | Minutes | Near-optimal |
-| ≥11 variables | Scalable heuristics | Configurable | Good solutions |
+| ≤6 variables | Exhaustive search per tree | Seconds | Optimal per tree |
+| 7-10 variables | Heuristic optimization per tree | Minutes | Near-optimal per tree |
+| ≥11 variables | Scalable heuristics per tree | Configurable | Good solutions per tree |
 
-Typical AIG node reductions: 10-50% depending on problem structure.
+**Benefits of Independent Optimization:**
+- Each tree achieves its own optimal structure
+- No forced common ordering constraints
+- Better overall AIG node reduction
 
 ## Files
 
@@ -99,19 +110,36 @@ forest.optimize_sel_order(max_iterations=5000)
 forest.optimize_sel_order(use_heuristics=False)
 ```
 
-## Example Results
+## API Changes: Independent Optimization
 
-For the provided Verilog example, the system reduces AIG node count from 15 to 14 nodes through optimal sel variable reordering, generating expressions like:
+**Important**: The `optimize_sel_order()` method now returns per-tree orders instead of a single global order:
 
-```verilog
-assign dout[0] = (sel[2] ? (sel[3] ? 1'b0 : 1'b1) : (sel[1] ? 1'b1 : din[3]));
-assign dout[1] = (sel[2] ? (sel[3] ? 1'b1 : ~din[2]) : 1'b0);
+```python
+# OLD API (forced same order for all trees)
+optimal_order, min_nodes = forest.optimize_sel_order()  # Returns List[str]
+
+# NEW API (independent order per tree) 
+optimal_orders, min_nodes = forest.optimize_sel_order()  # Returns List[List[str]]
+
+# Each tree can now have its own optimal order
+for i, order in enumerate(optimal_orders):
+    print(f"Tree {i} optimal order: {order}")
 ```
 
-For large-scale problems (12-bit selection), the optimization can achieve 20-50% AIG node reduction while completing in reasonable time.
+This change enables:
+- **Better individual tree simplification** - each tree finds its optimal structure
+- **Natural sharing** - trees with similar patterns naturally converge to similar orders
+- **Superior total optimization** - no artificial constraints force suboptimal compromises
+
+## Example Results
+
+For the provided Verilog example, each tree can now find its own optimal sel variable ordering. This typically maintains or improves upon the previous optimization results while allowing much better optimization for cases where trees have different optimal structures.
+
+For large-scale problems (12-bit selection), the independent optimization can achieve significant per-tree improvements, with the system automatically finding the best order for each output bit.
 
 ## Documentation
 
 - See `README_IMPLEMENTATION.md` for complete usage documentation and technical details
 - See `README_OPTIMIZATION.md` for comprehensive optimization algorithm guide
 - Run `python test_large_case.py` to test optimization on large-scale examples
+- Run `python test_independent_optimization.py` to see independent optimization in action
