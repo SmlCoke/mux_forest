@@ -9,6 +9,7 @@ from typing import List, Dict, Set, Tuple, Optional, Union
 from dataclasses import dataclass
 import itertools
 import random
+import math
 
 
 @dataclass
@@ -239,22 +240,144 @@ class BinaryDecisionForest:
             total += tree.count_nodes(visited)
         return total
     
-    def optimize_sel_order(self, max_iterations: int = 1000, use_heuristics: bool = True) -> Tuple[List[List[str]], int]:
+    def optimize_sel_order(self, max_iterations: int = 1000, use_heuristics: bool = True, 
+                          hybrid_strategy: bool = True) -> Tuple[List[List[str]], int]:
         """
-        Find the optimal sel variable ordering for each tree independently to minimize total AIG nodes.
-        Uses efficient algorithms to optimize each tree separately.
+        Find the optimal sel variable ordering to minimize total AIG nodes.
+        
+        Uses a hybrid strategy that tries both unified (same order for all trees) and 
+        independent (different order per tree) optimization, then chooses the better result.
         
         Args:
-            max_iterations: Maximum number of iterations per tree optimization (default: 1000)
+            max_iterations: Maximum number of iterations for optimization (default: 1000)
             use_heuristics: Whether to use heuristic optimization for large problems (default: True)
+            hybrid_strategy: Whether to try both unified and independent approaches (default: True)
         
         Returns:
             Tuple of (optimal_sel_orders_per_tree, minimum_total_node_count)
         """
         num_vars = len(self.sel_vars)
+        initial_nodes = self.count_total_nodes()
+        
+        print(f"Initial configuration: {initial_nodes} total nodes")
+        print(f"Strategy: {'Hybrid (unified vs independent)' if hybrid_strategy else 'Independent only'}")
+        
+        if not hybrid_strategy:
+            # Use only independent optimization (original approach)
+            return self._optimize_independent(max_iterations, use_heuristics)
+        
+        # Hybrid strategy: try both unified and independent approaches
+        print(f"\n=== TRYING UNIFIED OPTIMIZATION ===")
+        unified_orders, unified_nodes = self._optimize_unified(max_iterations, use_heuristics)
+        
+        print(f"\n=== TRYING INDEPENDENT OPTIMIZATION ===")
+        independent_orders, independent_nodes = self._optimize_independent(max_iterations, use_heuristics)
+        
+        # Choose the better result
+        if unified_nodes <= independent_nodes:
+            print(f"\n=== UNIFIED APPROACH WINS ===")
+            print(f"Unified: {unified_nodes} nodes vs Independent: {independent_nodes} nodes")
+            print(f"Using unified order for all trees: {unified_orders[0]}")
+            
+            # Apply unified order to all trees
+            self._apply_unified_order(unified_orders[0])
+            return unified_orders, unified_nodes
+        else:
+            print(f"\n=== INDEPENDENT APPROACH WINS ===")
+            print(f"Independent: {independent_nodes} nodes vs Unified: {unified_nodes} nodes")
+            print(f"Using independent orders per tree")
+            
+            # Independent result is already applied, just return it
+            return independent_orders, independent_nodes
+    
+    def _optimize_unified(self, max_iterations: int, use_heuristics: bool) -> Tuple[List[List[str]], int]:
+        """
+        Optimize using a unified sel order for all trees (maximizes mux sharing).
+        
+        Returns:
+            Tuple of (orders_per_tree, total_node_count) where all orders are the same
+        """
+        num_vars = len(self.sel_vars)
+        initial_nodes = self.count_total_nodes()
+        best_order = self.sel_vars.copy()
+        best_nodes = initial_nodes
+        
+        print(f"Optimizing unified order for {len(self.trees)} trees with {num_vars} variables...")
+        
+        if num_vars <= 6:
+            # Exhaustive search for unified order
+            print("Using exhaustive search for unified optimization...")
+            tested = 0
+            for perm in itertools.permutations(self.sel_vars):
+                perm_list = list(perm)
+                tested += 1
+                
+                total_nodes = self._evaluate_unified_order(perm_list)
+                if total_nodes < best_nodes:
+                    best_nodes = total_nodes
+                    best_order = perm_list
+                    print(f"  New best unified order: {best_nodes} nodes with {best_order}")
+            
+            print(f"Exhaustive search completed. Tested {tested} permutations.")
+        
+        elif use_heuristics:
+            # Heuristic optimization for unified order
+            print("Using heuristic optimization for unified order...")
+            
+            # Cross-tree variable importance analysis
+            var_importance = self._calculate_unified_variable_importance()
+            
+            # Greedy construction based on cross-tree analysis
+            greedy_order, greedy_nodes = self._greedy_construction_unified(var_importance)
+            if greedy_nodes < best_nodes:
+                best_nodes = greedy_nodes
+                best_order = greedy_order
+                print(f"  Greedy unified improved to {best_nodes} nodes")
+            
+            # Local search for unified order
+            local_order, local_nodes = self._local_search_unified(best_order, max_iterations // 2)
+            if local_nodes < best_nodes:
+                best_nodes = local_nodes
+                best_order = local_order
+                print(f"  Local search unified improved to {best_nodes} nodes")
+            
+            # Advanced cross-tree optimization (run with more iterations for better results)
+            advanced_order, advanced_nodes = self._advanced_unified_optimization(best_order, max_iterations)
+            if advanced_nodes < best_nodes:
+                best_nodes = advanced_nodes
+                best_order = advanced_order
+                print(f"  Advanced unified improved to {best_nodes} nodes")
+        
+        else:
+            # Random search for unified order
+            print(f"Using random search for unified order with {max_iterations} iterations...")
+            for i in range(max_iterations):
+                test_order = self.sel_vars.copy()
+                random.shuffle(test_order)
+                total_nodes = self._evaluate_unified_order(test_order)
+                
+                if total_nodes < best_nodes:
+                    best_nodes = total_nodes
+                    best_order = test_order
+                    print(f"  Random unified improved to {best_nodes} nodes at iteration {i}")
+        
+        print(f"Unified optimization complete: {initial_nodes} -> {best_nodes} nodes")
+        print(f"Best unified order: {best_order}")
+        
+        # Return the same order for all trees
+        unified_orders = [best_order.copy() for _ in range(len(self.trees))]
+        return unified_orders, best_nodes
+    
+    def _optimize_independent(self, max_iterations: int, use_heuristics: bool) -> Tuple[List[List[str]], int]:
+        """
+        Optimize each tree independently (original approach).
+        
+        Returns:
+            Tuple of (orders_per_tree, total_node_count)
+        """
+        num_vars = len(self.sel_vars)
         current_nodes = self.count_total_nodes()
         
-        print(f"Initial configuration: {current_nodes} total nodes")
         print(f"Optimizing {len(self.trees)} trees independently with {num_vars} variables each...")
         
         optimal_orders = []
@@ -289,16 +412,485 @@ class BinaryDecisionForest:
             print(f"  Tree {tree_idx}: {original_nodes} -> {new_nodes} nodes (improvement: {improvement})")
         
         final_nodes = self.count_total_nodes()
-        print(f"\nOptimization complete:")
+        print(f"Independent optimization complete:")
         print(f"  Initial total: {current_nodes} nodes")
         print(f"  Final total: {final_nodes} nodes") 
         print(f"  Total improvement: {current_nodes - final_nodes} nodes")
         
         return optimal_orders, final_nodes
     
+    def _apply_unified_order(self, unified_order: List[str]):
+        """Apply a unified order to all trees."""
+        for tree_idx in range(len(self.trees)):
+            reordered_dout_values = self._reorder_single_dout_list(self.dout_lists[tree_idx], unified_order)
+            self.trees[tree_idx] = BinaryDecisionTree(unified_order, reordered_dout_values)
+            self.tree_sel_orders[tree_idx] = unified_order.copy()
+    
+    def _evaluate_unified_order(self, order: List[str]) -> int:
+        """Evaluate total AIG node count for a unified sel variable order."""
+        try:
+            # Create temporary trees with the new order
+            temp_trees = []
+            for tree_idx in range(len(self.trees)):
+                reordered_dout_values = self._reorder_single_dout_list(self.dout_lists[tree_idx], order)
+                temp_tree = BinaryDecisionTree(order, reordered_dout_values)
+                temp_trees.append(temp_tree)
+            
+            # Count total nodes with sharing
+            visited = set()
+            total = 0
+            for tree in temp_trees:
+                total += tree.count_nodes(visited)
+            
+            return total
+        except Exception:
+            return float('inf')
+    
+    def _calculate_unified_variable_importance(self) -> Dict[str, float]:
+        """Calculate variable importance considering all trees together."""
+        importance = {var: 0.0 for var in self.sel_vars}
+        
+        for var in self.sel_vars:
+            total_score = 0.0
+            
+            # Test variable importance across all trees
+            for pos in range(min(3, len(self.sel_vars))):
+                test_order = self.sel_vars.copy()
+                test_order.remove(var)
+                test_order.insert(pos, var)
+                
+                try:
+                    total_nodes = self._evaluate_unified_order(test_order)
+                    weight = 1.0 / (pos + 1)
+                    total_score += weight / total_nodes if total_nodes > 0 else weight
+                except:
+                    continue
+            
+            importance[var] = total_score
+        
+        return importance
+    
+    def _greedy_construction_unified(self, var_importance: Dict[str, float]) -> Tuple[List[str], int]:
+        """Greedy construction for unified order based on cross-tree importance."""
+        sorted_vars = sorted(self.sel_vars, key=lambda v: var_importance.get(v, 0), reverse=True)
+        
+        try:
+            total_nodes = self._evaluate_unified_order(sorted_vars)
+            return sorted_vars, total_nodes
+        except:
+            return self.sel_vars.copy(), self._evaluate_unified_order(self.sel_vars)
+    
+    def _local_search_unified(self, initial_order: List[str], max_iterations: int) -> Tuple[List[str], int]:
+        """Local search optimization for unified order."""
+        current_order = initial_order.copy()
+        current_nodes = self._evaluate_unified_order(current_order)
+        best_order = current_order.copy()
+        best_nodes = current_nodes
+        
+        iterations = 0
+        improvements = 0
+        
+        while iterations < max_iterations:
+            iterations += 1
+            improved = False
+            
+            # Try adjacent swaps
+            for i in range(len(current_order) - 1):
+                test_order = current_order.copy()
+                test_order[i], test_order[i + 1] = test_order[i + 1], test_order[i]
+                
+                test_nodes = self._evaluate_unified_order(test_order)
+                
+                if test_nodes < current_nodes:
+                    current_order = test_order
+                    current_nodes = test_nodes
+                    improved = True
+                    improvements += 1
+                    
+                    if test_nodes < best_nodes:
+                        best_order = test_order.copy()
+                        best_nodes = test_nodes
+                    break
+            
+            # Try position moves every 10 iterations
+            if not improved and iterations % 10 == 0:
+                for i in range(len(current_order)):
+                    for j in range(len(current_order)):
+                        if i == j:
+                            continue
+                        
+                        test_order = current_order.copy()
+                        var = test_order.pop(i)
+                        test_order.insert(j, var)
+                        
+                        test_nodes = self._evaluate_unified_order(test_order)
+                        
+                        if test_nodes < current_nodes:
+                            current_order = test_order
+                            current_nodes = test_nodes
+                            improved = True
+                            improvements += 1
+                            
+                            if test_nodes < best_nodes:
+                                best_order = test_order.copy()
+                                best_nodes = test_nodes
+                            break
+                    if improved:
+                        break
+            
+            if not improved:
+                break
+        
+        return best_order, best_nodes
+    
+    def _advanced_unified_optimization(self, initial_order: List[str], max_iterations: int) -> Tuple[List[str], int]:
+        """Advanced optimization techniques for unified order with constant folding and sharing analysis."""
+        best_order = initial_order.copy()
+        best_nodes = self._evaluate_unified_order(best_order)
+        
+        # Phase 1: Constant-aware optimization
+        constant_aware_order, constant_aware_nodes = self._constant_aware_optimization(initial_order)
+        if constant_aware_nodes < best_nodes:
+            best_order = constant_aware_order
+            best_nodes = constant_aware_nodes
+            print(f"    Constant-aware optimization improved to {best_nodes} nodes")
+        
+        # Phase 2: Sharing-aware reordering
+        sharing_aware_order, sharing_aware_nodes = self._sharing_aware_optimization(best_order, max_iterations // 3)
+        if sharing_aware_nodes < best_nodes:
+            best_order = sharing_aware_order
+            best_nodes = sharing_aware_nodes
+            print(f"    Sharing-aware optimization improved to {best_nodes} nodes")
+        
+        # Phase 3: Simulated annealing with adaptive cooling
+        annealing_order, annealing_nodes = self._adaptive_simulated_annealing(best_order, max_iterations // 3)
+        if annealing_nodes < best_nodes:
+            best_order = annealing_order
+            best_nodes = annealing_nodes
+            print(f"    Adaptive annealing improved to {best_nodes} nodes")
+        
+        # Phase 4: Multi-level optimization
+        multilevel_order, multilevel_nodes = self._multilevel_optimization(best_order, max_iterations // 3)
+        if multilevel_nodes < best_nodes:
+            best_order = multilevel_order
+            best_nodes = multilevel_nodes
+            print(f"    Multi-level optimization improved to {best_nodes} nodes")
+        
+        return best_order, best_nodes
+    
+    def _constant_aware_optimization(self, initial_order: List[str]) -> Tuple[List[str], int]:
+        """Optimize considering constant values (0, 1, x) and their impact on sharing."""
+        # Analyze which variables have the most constant/don't-care values
+        var_entropy = {}
+        
+        for var_idx, var in enumerate(self.sel_vars):
+            total_entropy = 0.0
+            
+            for tree_idx in range(len(self.trees)):
+                # Calculate entropy for this variable in this tree
+                values_0 = []  # Values when var=0
+                values_1 = []  # Values when var=1
+                
+                num_combinations = len(self.dout_lists[tree_idx])
+                for combo_idx in range(num_combinations):
+                    # Check if this combination has var=0 or var=1
+                    bit_val = (combo_idx >> (len(self.sel_vars) - 1 - var_idx)) & 1
+                    value = self.dout_lists[tree_idx][combo_idx]
+                    
+                    if bit_val == 0:
+                        values_0.append(value)
+                    else:
+                        values_1.append(value)
+                
+                # Calculate entropy - variables with more constants have lower entropy
+                def calc_entropy(values):
+                    if not values:
+                        return 0
+                    unique_vals = set(values)
+                    entropy = 0
+                    for val in unique_vals:
+                        prob = values.count(val) / len(values)
+                        if prob > 0:
+                            entropy -= prob * math.log2(prob)
+                    return entropy
+                
+                entropy_0 = calc_entropy(values_0)
+                entropy_1 = calc_entropy(values_1)
+                total_entropy += entropy_0 + entropy_1
+            
+            var_entropy[var] = total_entropy
+        
+        # Sort variables by entropy (low entropy = high constant ratio = should be deeper)
+        sorted_vars = sorted(self.sel_vars, key=lambda v: var_entropy[v], reverse=True)
+        
+        # Try this constant-aware ordering
+        constant_nodes = self._evaluate_unified_order(sorted_vars)
+        
+        # Try hybrid approach: high-entropy vars first, then low-entropy
+        mid_point = len(sorted_vars) // 2
+        high_entropy = sorted_vars[:mid_point]
+        low_entropy = sorted_vars[mid_point:]
+        
+        # Try different combinations
+        best_order = initial_order.copy()
+        best_nodes = self._evaluate_unified_order(best_order)
+        
+        for order in [sorted_vars, sorted_vars[::-1], high_entropy + low_entropy, low_entropy + high_entropy]:
+            nodes = self._evaluate_unified_order(order)
+            if nodes < best_nodes:
+                best_nodes = nodes
+                best_order = order
+        
+        return best_order, best_nodes
+    
+    def _sharing_aware_optimization(self, initial_order: List[str], max_iterations: int) -> Tuple[List[str], int]:
+        """Optimize considering potential sharing between trees."""
+        best_order = initial_order.copy()
+        best_nodes = self._evaluate_unified_order(best_order)
+        
+        # Analyze sharing potential at different levels
+        for iteration in range(max_iterations):
+            # Try to group variables that create similar subtree patterns
+            test_order = self._reorder_for_sharing(initial_order, iteration)
+            test_nodes = self._evaluate_unified_order(test_order)
+            
+            if test_nodes < best_nodes:
+                best_nodes = test_nodes
+                best_order = test_order
+        
+        return best_order, best_nodes
+    
+    def _reorder_for_sharing(self, order: List[str], iteration: int) -> List[str]:
+        """Reorder variables to maximize sharing potential."""
+        test_order = order.copy()
+        
+        # Strategy based on iteration
+        if iteration % 4 == 0:
+            # Move high-impact variables to front
+            random.shuffle(test_order[:3])
+        elif iteration % 4 == 1:
+            # Move middle variables around
+            mid = len(test_order) // 2
+            random.shuffle(test_order[mid-2:mid+2])
+        elif iteration % 4 == 2:
+            # Reverse some subsequence
+            i = random.randint(0, len(test_order) - 3)
+            j = random.randint(i + 2, len(test_order))
+            test_order[i:j] = test_order[i:j][::-1]
+        else:
+            # Random adjacent swap
+            i = random.randint(0, len(test_order) - 2)
+            test_order[i], test_order[i+1] = test_order[i+1], test_order[i]
+        
+        return test_order
+    
+    def _adaptive_simulated_annealing(self, initial_order: List[str], max_iterations: int) -> Tuple[List[str], int]:
+        """Simulated annealing with adaptive temperature and cooling schedule."""
+        best_order = initial_order.copy()
+        best_nodes = self._evaluate_unified_order(best_order)
+        
+        current_order = best_order.copy()
+        current_nodes = best_nodes
+        
+        # Adaptive parameters
+        temperature = max(100.0, best_nodes * 0.1)  # Scale with problem size
+        min_temperature = 1.0
+        cooling_rate = 0.95
+        reheat_threshold = max_iterations // 4
+        last_improvement = 0
+        
+        for iteration in range(max_iterations):
+            # Generate neighbor with varied strategies
+            test_order = self._generate_neighbor(current_order, iteration, max_iterations)
+            test_nodes = self._evaluate_unified_order(test_order)
+            
+            # Accept or reject based on simulated annealing
+            delta = test_nodes - current_nodes
+            accept = False
+            
+            if delta < 0:
+                accept = True
+            elif temperature > min_temperature:
+                probability = math.exp(-delta / temperature)
+                accept = random.random() < probability
+            
+            if accept:
+                current_order = test_order
+                current_nodes = test_nodes
+                
+                if test_nodes < best_nodes:
+                    best_order = test_order.copy()
+                    best_nodes = test_nodes
+                    last_improvement = iteration
+            
+            # Adaptive cooling and reheating
+            if iteration - last_improvement > reheat_threshold:
+                # Reheat
+                temperature = min(temperature * 2.0, best_nodes * 0.1)
+                last_improvement = iteration
+            else:
+                temperature *= cooling_rate
+                temperature = max(temperature, min_temperature)
+        
+        return best_order, best_nodes
+    
+    def _generate_neighbor(self, order: List[str], iteration: int, max_iterations: int) -> List[str]:
+        """Generate neighbor solution with strategy based on iteration phase."""
+        test_order = order.copy()
+        phase = iteration / max_iterations
+        
+        if phase < 0.3:  # Early phase: large moves
+            # Block move
+            block_size = min(3, len(test_order) // 3)
+            start = random.randint(0, len(test_order) - block_size)
+            block = test_order[start:start + block_size]
+            del test_order[start:start + block_size]
+            new_pos = random.randint(0, len(test_order))
+            test_order[new_pos:new_pos] = block
+            
+        elif phase < 0.7:  # Middle phase: medium moves
+            # Triple swap
+            indices = random.sample(range(len(test_order)), min(3, len(test_order)))
+            values = [test_order[i] for i in indices]
+            random.shuffle(values)
+            for i, val in zip(indices, values):
+                test_order[i] = val
+                
+        else:  # Late phase: fine tuning
+            # Adjacent swap or single move
+            if random.random() < 0.7:
+                i = random.randint(0, len(test_order) - 2)
+                test_order[i], test_order[i+1] = test_order[i+1], test_order[i]
+            else:
+                i = random.randint(0, len(test_order) - 1)
+                j = random.randint(0, len(test_order) - 1)
+                if i != j:
+                    var = test_order.pop(i)
+                    test_order.insert(j, var)
+        
+        return test_order
+    
+    def _multilevel_optimization(self, initial_order: List[str], max_iterations: int) -> Tuple[List[str], int]:
+        """Multi-level optimization with divide-and-conquer approach."""
+        if len(initial_order) <= 4:
+            return initial_order, self._evaluate_unified_order(initial_order)
+        
+        best_order = initial_order.copy()
+        best_nodes = self._evaluate_unified_order(best_order)
+        
+        # Divide variables into groups and optimize within groups
+        group_size = min(6, len(initial_order) // 2)
+        
+        for start_pos in range(0, len(initial_order) - group_size + 1, max(1, group_size // 2)):
+            end_pos = min(start_pos + group_size, len(initial_order))
+            
+            # Extract group and optimize
+            prefix = best_order[:start_pos]
+            group = best_order[start_pos:end_pos]
+            suffix = best_order[end_pos:]
+            
+            # Try all permutations of the group (if small enough)
+            if len(group) <= 5:
+                best_group = group
+                best_group_score = float('inf')
+                
+                for perm in itertools.permutations(group):
+                    test_order = prefix + list(perm) + suffix
+                    score = self._evaluate_unified_order(test_order)
+                    
+                    if score < best_group_score:
+                        best_group_score = score
+                        best_group = list(perm)
+                
+                test_order = prefix + best_group + suffix
+                test_nodes = self._evaluate_unified_order(test_order)
+                
+                if test_nodes < best_nodes:
+                    best_nodes = test_nodes
+                    best_order = test_order
+        
+        return best_order, best_nodes
+    
+    def optimize_with_constant_folding(self, max_iterations: int = 1000) -> Tuple[List[List[str]], int]:
+        """
+        Enhanced optimization with constant folding and special value optimization.
+        
+        This method specifically targets the issues mentioned by the user:
+        - Mux gate reuse through unified ordering
+        - Special node (1,0,x) utilization 
+        - Advanced sel signal reordering
+        """
+        initial_nodes = self.count_total_nodes()
+        print(f"Starting constant folding optimization from {initial_nodes} nodes...")
+        
+        # Step 1: Apply constant folding to all trees
+        original_trees = [tree for tree in self.trees]
+        folded_improvements = 0
+        
+        for tree_idx in range(len(self.trees)):
+            original_count = self.trees[tree_idx].count_nodes()
+            self.trees[tree_idx] = self._apply_constant_folding(self.trees[tree_idx])
+            new_count = self.trees[tree_idx].count_nodes()
+            folded_improvements += original_count - new_count
+        
+        folded_nodes = self.count_total_nodes()
+        print(f"Constant folding: {initial_nodes} -> {folded_nodes} nodes (improvement: {folded_improvements})")
+        
+        # Step 2: Run hybrid optimization on folded trees
+        optimal_orders, optimized_nodes = self.optimize_sel_order(max_iterations, True, True)
+        
+        final_improvement = initial_nodes - optimized_nodes
+        print(f"Total optimization: {initial_nodes} -> {optimized_nodes} nodes (improvement: {final_improvement})")
+        
+        return optimal_orders, optimized_nodes
+    
+    def _apply_constant_folding(self, tree: 'BinaryDecisionTree') -> 'BinaryDecisionTree':
+        """Apply constant folding optimizations to a tree."""
+        # Create a new optimized tree by folding constants
+        folded_root = self._fold_constants_recursive(tree.root)
+        
+        # Create new tree with folded structure
+        new_tree = BinaryDecisionTree(tree.sel_vars, [])
+        new_tree.root = folded_root
+        
+        return new_tree
+    
+    def _fold_constants_recursive(self, node: TreeNode) -> TreeNode:
+        """Recursively apply constant folding optimizations."""
+        if node.is_terminal():
+            return node
+        
+        # Recursively fold children
+        left_folded = self._fold_constants_recursive(node.left)
+        right_folded = self._fold_constants_recursive(node.right)
+        
+        # Check for folding opportunities
+        if left_folded.is_terminal() and right_folded.is_terminal():
+            # Both children are terminals
+            if left_folded.value == right_folded.value:
+                # Same value on both sides - can eliminate this mux
+                return TreeNode(value=left_folded.value)
+            
+            # Check for special patterns
+            if left_folded.value == 0 and right_folded.value == 1:
+                # sel ? 1 : 0 = sel
+                return TreeNode(value=f"sel_var_{node.sel_var}")
+            elif left_folded.value == 1 and right_folded.value == 0:
+                # sel ? 0 : 1 = ~sel
+                return TreeNode(value=f"~sel_var_{node.sel_var}")
+        
+        # Check if one side is don't care
+        if left_folded.is_terminal() and left_folded.value == -1:
+            # Don't care on left, use right
+            return right_folded
+        elif right_folded.is_terminal() and right_folded.value == -1:
+            # Don't care on right, use left
+            return left_folded
+        
+        # No folding possible, create new node with folded children
+        return TreeNode(sel_var=node.sel_var, left=left_folded, right=right_folded)
+    
     def _optimize_single_tree_exhaustive(self, tree_idx: int) -> Tuple[List[str], int]:
-        """Exhaustive search for a single tree (small problems)."""
-        original_tree = self.trees[tree_idx]
         original_nodes = original_tree.count_nodes()
         best_order = self.tree_sel_orders[tree_idx].copy()
         best_nodes = original_nodes
